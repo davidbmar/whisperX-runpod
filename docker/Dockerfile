@@ -13,7 +13,8 @@
 #   WHISPER_MODEL - Model to pre-download (tiny/base/small/medium/large-v2)
 # =============================================================================
 
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+# Use cudnn variant for deep learning support
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG WHISPER_MODEL=small
