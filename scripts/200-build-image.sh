@@ -133,12 +133,13 @@ main() {
     local start_time=$(date +%s)
 
     # Build with model as build argument
+    # Context is project root (contains src/ and requirements.txt)
     docker build \
         $NO_CACHE \
         --build-arg WHISPER_MODEL="$WHISPER_MODEL" \
         -t "$docker_tag" \
         -f "$dockerfile" \
-        "$PROJECT_ROOT/docker"
+        "$PROJECT_ROOT"
 
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))

@@ -15,8 +15,25 @@ import gc
 import logging
 from typing import Optional, Dict, Any, List
 
-import whisperx
+# =============================================================================
+# PyTorch 2.6+ Compatibility Patch
+# =============================================================================
+# PyTorch 2.6 changed torch.load default to weights_only=True, which breaks
+# loading pyannote models. Apply monkey-patch before importing whisperx.
+# Force weights_only=False for all torch.load calls.
 import torch
+
+_original_torch_load = torch.load
+
+def _patched_torch_load(*args, **kwargs):
+    """Patched torch.load forcing weights_only=False for pyannote compatibility."""
+    kwargs['weights_only'] = False
+    return _original_torch_load(*args, **kwargs)
+
+torch.load = _patched_torch_load
+# =============================================================================
+
+import whisperx
 
 logger = logging.getLogger(__name__)
 

@@ -55,9 +55,10 @@ RUN pip install --no-cache-dir whisperx runpod
 # Pre-download Whisper Model (for faster cold starts)
 # =============================================================================
 # Download model at build time so it's cached in the image
+# Note: Patch torch.load for PyTorch 2.6+ compatibility with pyannote models
+# Force weights_only=False to allow loading pyannote checkpoints
 RUN echo "Pre-downloading Whisper model: ${WHISPER_MODEL}" && \
-    python3 -c "import whisperx; whisperx.load_model('${WHISPER_MODEL}', device='cpu', compute_type='int8')" && \
-    echo "Model downloaded successfully"
+    python3 -c "import torch; _orig = torch.load; torch.load = lambda *a, **k: _orig(*a, **{**k, 'weights_only': False}); import whisperx; whisperx.load_model('${WHISPER_MODEL}', device='cpu', compute_type='int8'); print('Model downloaded successfully')"
 
 # =============================================================================
 # Application Code
