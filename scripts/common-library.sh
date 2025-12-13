@@ -38,8 +38,8 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# RunPod API
-RUNPOD_API_BASE="https://api.runpod.io/v2"
+# RunPod API (serverless uses api.runpod.ai, not api.runpod.io)
+RUNPOD_API_BASE="https://api.runpod.ai/v2"
 
 # ============================================================================
 # JSON Logging
