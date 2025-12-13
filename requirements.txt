@@ -1,0 +1,26 @@
+# =============================================================================
+# WhisperX RunPod Server Dependencies
+# =============================================================================
+# Install with: pip install -r requirements.txt
+# =============================================================================
+
+# Core WhisperX (includes faster-whisper, torch, etc.)
+whisperx>=3.1.1
+
+# RunPod Serverless SDK
+runpod>=1.6.0
+
+# Audio processing
+ffmpeg-python>=0.2.0
+pydub>=0.25.1
+
+# HTTP requests (for audio URL fetching)
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Diarization (included with whisperx, but pinning for stability)
+pyannote.audio>=3.1.0
+
+# Utilities
+python-dotenv>=1.0.0
+tqdm>=4.66.0
