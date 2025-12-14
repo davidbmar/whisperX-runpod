@@ -1,6 +1,6 @@
 # WhisperX-RunPod
 
-Serverless batch transcription with speaker diarization on RunPod GPU cloud.
+Batch transcription with speaker diarization on GPU cloud (RunPod or AWS EC2).
 
 ## Features
 
@@ -18,52 +18,70 @@ Serverless batch transcription with speaker diarization on RunPod GPU cloud.
 # Clone the repository
 cd ~/event-b/whisperX-runpod
 
-# Run interactive setup (copies Docker Hub username if you have whisperlive-salad configured)
-./scripts/000-questions.sh
+# Run interactive setup
+./scripts/010-setup--configure-environment.sh
 ```
 
-### 2. Build & Deploy
+### 2. Build & Push
 
 ```bash
-./scripts/200-build-image.sh        # Build Docker image
-./scripts/205-push-to-registry.sh   # Push to Docker Hub
-./scripts/210-create-endpoint.sh    # Create RunPod endpoint
+./scripts/100-build--docker-image.sh      # Build Docker image
+./scripts/110-build--push-to-dockerhub.sh # Push to Docker Hub
 ```
 
-### 3. Test
+### 3. Test on EC2 (Recommended First)
 
 ```bash
-./scripts/215-test-endpoint.sh      # Quick health check
-./scripts/220-test-transcription.sh # Full transcription test
+# Launch a GPU instance from your build box
+./scripts/200-ec2--launch-gpu-instance.sh  # Launches g4dn.xlarge via AWS CLI
+./scripts/205-ec2--wait-for-ready.sh       # Wait for Docker + GPU ready
+
+# Deploy and test
+./scripts/210-ec2--deploy-container.sh     # Pull and run container
+./scripts/230-ec2--test-api.sh             # Test transcription
+./scripts/240-ec2--view-logs.sh            # View logs if needed
+./scripts/220-ec2--terminate-instance.sh   # Terminate when done (saves money!)
 ```
 
-## Usage
-
-### Via API
+### 4. Deploy to RunPod
 
 ```bash
-# Transcribe from URL
-curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
-  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+./scripts/300-runpod--create-pod.sh       # Create RunPod GPU pod
+./scripts/320-runpod--test-api.sh         # Test transcription
+./scripts/330-runpod--view-logs.sh        # View pod status
+./scripts/340-runpod--stop-pod.sh         # Stop when done
+```
+
+### 5. Cleanup
+
+```bash
+./scripts/900-manage--cleanup-all.sh      # Stop all running resources
+```
+
+---
+
+## API Usage
+
+### Health Check
+
+```bash
+curl http://HOST:8000/health
+```
+
+### Transcribe from URL
+
+```bash
+curl -X POST http://HOST:8000/transcribe \
   -H "Content-Type: application/json" \
-  -d '{
-    "input": {
-      "audio_url": "https://example.com/audio.wav",
-      "diarize": true
-    }
-  }'
+  -d '{"audio_url": "https://example.com/audio.wav", "diarize": true}'
+```
 
-# Transcribe from base64
-curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
-  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "input": {
-      "audio_base64": "'$(base64 -w0 audio.wav)'",
-      "language": "en",
-      "diarize": true
-    }
-  }'
+### Upload File
+
+```bash
+curl -X POST http://HOST:8000/transcribe/upload \
+  -F "file=@audio.wav" \
+  -F "diarize=true"
 ```
 
 ### Response Format
@@ -89,19 +107,52 @@ curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
 }
 ```
 
+---
+
 ## Scripts
+
+### Setup (010)
 
 | Script | Description |
 |--------|-------------|
-| `000-questions.sh` | Interactive setup - configure API keys, model selection |
-| `200-build-image.sh` | Build Docker image with selected model |
-| `205-push-to-registry.sh` | Push image to Docker Hub |
-| `210-create-endpoint.sh` | Create RunPod serverless endpoint |
-| `215-test-endpoint.sh` | Quick health check |
-| `220-test-transcription.sh` | Full transcription test |
-| `900-runpod-status.sh` | Check endpoint status |
-| `905-runpod-logs.sh` | View endpoint logs |
-| `915-runpod-delete.sh` | Delete endpoint |
+| `010-setup--configure-environment.sh` | Interactive setup - configure API keys, model selection |
+
+### Build (100)
+
+| Script | Description |
+|--------|-------------|
+| `100-build--docker-image.sh` | Build Docker image with selected model |
+| `110-build--push-to-dockerhub.sh` | Push image to Docker Hub |
+
+### EC2 (200)
+
+| Script | Description |
+|--------|-------------|
+| `200-ec2--launch-gpu-instance.sh` | Launch EC2 GPU instance via AWS CLI |
+| `205-ec2--wait-for-ready.sh` | Wait for Docker + GPU to be ready |
+| `210-ec2--deploy-container.sh` | Deploy and run container on EC2 |
+| `220-ec2--terminate-instance.sh` | Terminate EC2 instance |
+| `230-ec2--test-api.sh` | Test HTTP API (works for any host) |
+| `240-ec2--view-logs.sh` | View container logs on EC2 |
+| `250-ec2--stop-container.sh` | Stop container (keep instance) |
+
+### RunPod (300)
+
+| Script | Description |
+|--------|-------------|
+| `300-runpod--create-pod.sh` | Create RunPod GPU pod |
+| `310-runpod--deploy-container.sh` | Redeploy container to existing pod |
+| `320-runpod--test-api.sh` | Test HTTP API on RunPod |
+| `330-runpod--view-logs.sh` | View pod status and info |
+| `340-runpod--stop-pod.sh` | Stop or delete RunPod pod |
+
+### Management (900)
+
+| Script | Description |
+|--------|-------------|
+| `900-manage--cleanup-all.sh` | Stop all running resources |
+
+---
 
 ## Model Selection
 
@@ -121,6 +172,7 @@ curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
 - Docker installed locally
 - Docker Hub account
 - RunPod account with API key
+- AWS account with EC2 access (optional, for testing)
 - HuggingFace account with token (for diarization)
 
 ### HuggingFace Setup (for Diarization)
@@ -142,6 +194,8 @@ All configuration is done via environment variables in `.env`:
 | `WHISPER_MODEL` | No | Model size (default: small) |
 | `HF_TOKEN` | For diarization | HuggingFace token |
 | `ENABLE_DIARIZATION` | No | Enable speakers (default: true) |
+| `AWS_EC2_HOST` | For EC2 | EC2 instance hostname |
+| `AWS_SSH_KEY` | For EC2 | Path to SSH key file |
 
 ## License
 
@@ -152,4 +206,4 @@ MIT License - see LICENSE file for details.
 - [WhisperX](https://github.com/m-bain/whisperX) - Fast transcription with word-level timestamps
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) - CTranslate2 backend
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) - Speaker diarization
-- [RunPod](https://www.runpod.io/) - Serverless GPU cloud
+- [RunPod](https://www.runpod.io/) - GPU cloud

@@ -4,88 +4,114 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-WhisperX-RunPod is a serverless batch transcription service using WhisperX with speaker diarization, deployed on RunPod GPU cloud. It provides 70x realtime transcription speed with word-level timestamps and automatic speaker identification.
-
-## Build & Run Commands
-
-### Initial Setup
-```bash
-./scripts/000-questions.sh     # Interactive configuration
-```
-
-### Build & Deploy
-```bash
-./scripts/200-build-image.sh        # Build Docker image
-./scripts/205-push-to-registry.sh   # Push to Docker Hub
-./scripts/210-create-endpoint.sh    # Create RunPod endpoint
-./scripts/215-test-endpoint.sh      # Test endpoint health
-./scripts/220-test-transcription.sh # Full transcription test
-```
-
-### Management
-```bash
-./scripts/900-runpod-status.sh   # Check endpoint status
-./scripts/905-runpod-logs.sh     # View logs
-./scripts/915-runpod-delete.sh   # Delete endpoint
-```
-
-### Local Testing
-```bash
-# Build image locally
-docker build -t whisperx-runpod --build-arg WHISPER_MODEL=small docker/
-
-# Test handler locally (requires GPU)
-python src/handler.py
-```
+WhisperX-RunPod is a batch transcription service with speaker diarization that runs on GPU cloud platforms (AWS EC2 or RunPod). It uses WhisperX for fast transcription with word-level timestamps and pyannote for speaker diarization.
 
 ## Architecture
 
-### Core Components
-
-**RunPod Handler (`src/handler.py`)**
-- Serverless entry point for RunPod
-- Receives audio via base64 or URL
-- Returns transcription with speaker labels
-
-**WhisperX Transcriber (`src/transcribe.py`)**
-- Wrapper around WhisperX library
-- Handles model loading, transcription, alignment, diarization
-- Caches model across requests for performance
-
-**Common Library (`scripts/common-library.sh`)**
-- Shared bash functions for all scripts
-- Logging, environment management, RunPod API calls
-
-### Request Flow
 ```
-Client Request → RunPod API → Handler → WhisperX Transcriber → Response
-                                ↓
-                         Load audio (base64/URL)
-                                ↓
-                         Transcribe (faster-whisper)
-                                ↓
-                         Align (wav2vec2)
-                                ↓
-                         Diarize (pyannote)
-                                ↓
-                         Return JSON result
+Build Box (no GPU)           →    EC2 GPU Instance    →    RunPod Pod (production)
+├── Build Docker image            ├── Run container        ├── Final deployment
+├── Push to Docker Hub            ├── Test API             └── Production workloads
+└── Launch/manage instances       └── Validate before
+    via AWS CLI / RunPod API          RunPod deployment
 ```
 
-### Input Format
+The build box orchestrates everything via SSH (EC2) or REST API (RunPod). It does NOT need a GPU.
+
+## Script Structure
+
+Scripts use the naming convention: `NNN-section--action-description.sh`
+
+```
+scripts/
+├── _common.sh                              # Shared functions (underscore sorts first)
+│
+├── 010-setup--configure-environment.sh     # Interactive .env setup
+│
+├── 100-build--docker-image.sh              # Build Docker image
+├── 110-build--push-to-dockerhub.sh         # Push image to Docker Hub
+│
+├── 200-ec2--launch-gpu-instance.sh         # Launch EC2 GPU instance via AWS CLI
+├── 205-ec2--wait-for-ready.sh              # Wait for Docker + GPU to be ready
+├── 210-ec2--deploy-container.sh            # SSH to EC2, pull & run container
+├── 220-ec2--terminate-instance.sh          # Terminate EC2 instance
+├── 230-ec2--test-api.sh                    # Test HTTP API
+├── 240-ec2--view-logs.sh                   # View container logs
+├── 250-ec2--stop-container.sh              # Stop container (keep instance)
+│
+├── 300-runpod--create-pod.sh               # Create RunPod GPU pod
+├── 310-runpod--deploy-container.sh         # Redeploy container to pod
+├── 320-runpod--test-api.sh                 # Test HTTP API on RunPod
+├── 330-runpod--view-logs.sh                # View pod status
+├── 340-runpod--stop-pod.sh                 # Stop/delete pod
+│
+└── 900-manage--cleanup-all.sh              # Stop all running resources
+```
+
+## Typical Workflow
+
+### First Time Setup
+```bash
+./scripts/010-setup--configure-environment.sh
+```
+
+### Build & Push
+```bash
+./scripts/100-build--docker-image.sh
+./scripts/110-build--push-to-dockerhub.sh
+```
+
+### Test on EC2 (Recommended First)
+```bash
+./scripts/200-ec2--launch-gpu-instance.sh    # Launch g4dn.xlarge via AWS CLI
+./scripts/205-ec2--wait-for-ready.sh         # Wait for Docker + GPU
+./scripts/210-ec2--deploy-container.sh       # Deploy container
+./scripts/230-ec2--test-api.sh               # Test transcription
+./scripts/220-ec2--terminate-instance.sh     # Terminate when done
+```
+
+### Deploy to RunPod (After EC2 Validation)
+```bash
+./scripts/300-runpod--create-pod.sh
+./scripts/320-runpod--test-api.sh
+./scripts/340-runpod--stop-pod.sh            # When done
+```
+
+## Key Files
+
+- `.env` - Configuration (API keys, Docker Hub username, model settings)
+- `artifacts/ec2-test-instance.json` - EC2 instance state (auto-created)
+- `docker/Dockerfile.pod` - Docker image for HTTP API
+- `src/handler_pod.py` - FastAPI HTTP endpoint
+
+## API Endpoints
+
+The WhisperX container exposes:
+- `GET /health` - Health check
+- `POST /transcribe` - Transcribe from URL
+- `POST /transcribe/upload` - Transcribe uploaded file
+
+Example:
+```bash
+curl -X POST http://HOST:8000/transcribe \
+  -H "Content-Type: application/json" \
+  -d '{"audio_url": "https://example.com/audio.wav", "diarize": true}'
+```
+
+## Input/Output Format
+
+### Input
 ```json
 {
-    "input": {
-        "audio_base64": "...",       // Base64 encoded audio
-        "audio_url": "https://...",  // OR URL to audio file
-        "language": "en",            // Optional: force language
-        "diarize": true,             // Optional: enable diarization
-        "min_speakers": 1,           // Optional: speaker hint
-        "max_speakers": 10           // Optional: speaker hint
-    }
+    "audio_url": "https://...",    // URL to audio file
+    "language": "en",              // Optional: force language
+    "diarize": true,               // Optional: enable diarization
+    "min_speakers": 1,             // Optional: speaker hint
+    "max_speakers": 10             // Optional: speaker hint
 }
 ```
 
-### Output Format
+### Output
 ```json
 {
     "segments": [
@@ -105,50 +131,53 @@ Client Request → RunPod API → Handler → WhisperX Transcriber → Response
 }
 ```
 
-## Directory Structure
+## Configuration Variables
 
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `RUNPOD_API_KEY` | Yes | RunPod API key |
+| `DOCKER_HUB_USERNAME` | Yes | Docker Hub username |
+| `DOCKER_IMAGE` | Yes | Image name (default: whisperx-runpod) |
+| `WHISPER_MODEL` | No | Model size: tiny, base, small, medium, large-v2, large-v3 |
+| `WHISPER_COMPUTE_TYPE` | No | Precision: float16/int8 |
+| `HF_TOKEN` | For diarization | HuggingFace token |
+| `ENABLE_DIARIZATION` | No | Enable speaker detection (default: true) |
+| `EC2_KEY_NAME` | For EC2 | AWS SSH key pair name |
+| `AWS_REGION` | For EC2 | AWS region (default: us-east-2) |
+
+## Safety Features
+
+- EC2 instances auto-terminate after 90 minutes (safety net)
+- State files track running resources
+- Cleanup script stops all resources at once
+
+## Common Issues
+
+### EC2 Launch Fails
+- Check AWS CLI is configured: `aws sts get-caller-identity`
+- Ensure SSH key pair exists in the region
+- Check you have g4dn.xlarge quota in the region
+
+### Container Won't Start
+- Check HF_TOKEN is set for diarization models
+- View logs: `./scripts/240-ec2--view-logs.sh`
+
+### Model Loading Slow
+- First run downloads models (~2-5GB depending on model size)
+- Subsequent runs use cached models
+
+## Docker Image
+
+The image uses:
+- Base: `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04`
+- WhisperX with faster-whisper backend
+- pyannote for speaker diarization
+- FastAPI for HTTP API
+
+Build locally:
+```bash
+./scripts/100-build--docker-image.sh
 ```
-whisperX-runpod/
-├── src/                    # Python source code
-│   ├── handler.py          # RunPod serverless handler
-│   ├── transcribe.py       # WhisperX wrapper
-│   └── utils.py            # Utilities
-├── docker/                 # Docker configurations
-│   ├── Dockerfile          # Full image with diarization
-│   └── Dockerfile.slim     # Without diarization
-├── scripts/                # Deployment scripts
-│   ├── common-library.sh   # Shared functions
-│   ├── config/             # Configuration modules
-│   ├── 000-questions.sh    # Setup
-│   ├── 2xx-*.sh            # Deployment
-│   └── 9xx-*.sh            # Management
-├── .env.template           # Configuration template
-├── .gitignore              # Git exclusions
-└── requirements.txt        # Python dependencies
-```
-
-## Key Patterns
-
-### Adding New Features
-1. Modify `src/handler.py` to accept new input parameters
-2. Update `src/transcribe.py` to implement the feature
-3. Update input/output documentation in handler docstring
-4. Test locally before deploying
-
-### Environment Variables
-All configuration via environment variables (no hardcoded values):
-- `WHISPER_MODEL`: Model size (tiny/base/small/medium/large-v2)
-- `WHISPER_COMPUTE_TYPE`: Precision (float16/int8)
-- `HF_TOKEN`: HuggingFace token for diarization
-- `ENABLE_DIARIZATION`: Toggle diarization on/off
-
-### Script Standards
-All scripts include:
-- Header comment explaining purpose
-- `set -euo pipefail` for safety
-- Sourcing `common-library.sh`
-- `start_logging` for log files
-- `print_status` for colored output
 
 ## Model Options
 
@@ -160,6 +189,17 @@ All scripts include:
 | medium | Slower | Better | ~5GB | RTX A4000 |
 | large-v2 | Slow | Best | ~8GB | RTX A5000 |
 | large-v3 | Slowest | Best | ~10GB | RTX A6000 |
+
+## RunPod vs EC2
+
+| Aspect | EC2 | RunPod |
+|--------|-----|--------|
+| Cost | ~$0.52/hr (g4dn.xlarge) | ~$0.20-0.50/hr |
+| Setup | More complex | Simple |
+| Debugging | Full SSH access | Limited |
+| Use case | Testing/validation | Production |
+
+**Recommendation:** Test on EC2 first, then deploy to RunPod.
 
 ## Security Notes
 

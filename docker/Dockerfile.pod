@@ -1,0 +1,93 @@
+# =============================================================================
+# WhisperX Pod Mode (FastAPI HTTP API) - GPU Compatible
+# =============================================================================
+# Build with: docker build -f docker/Dockerfile.pod -t whisperx-pod .
+#
+# WHAT THIS DOCKERFILE DOES:
+#   1. Uses Python base with pip-installed NVIDIA libraries (no CUDA base needed)
+#   2. Installs WhisperX, pyannote, FastAPI
+#   3. Pre-downloads the Whisper model
+#   4. Runs HTTP API on port 8000
+#
+# WHY THIS APPROACH:
+#   Using pip-installed nvidia-cublas-cu12 and nvidia-cudnn-cu12 avoids CUDA
+#   driver version mismatches that occur with nvidia/cuda base images.
+#   This works with any host CUDA driver 12.x+ including 13.x drivers.
+#
+# Run with:
+#   docker run --gpus all -p 8000:8000 \
+#     -e HF_TOKEN=your_token \
+#     -e WHISPER_MODEL=small \
+#     whisperx-pod
+# =============================================================================
+
+FROM python:3.11-bookworm
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG WHISPER_MODEL=small
+
+# =============================================================================
+# System Dependencies
+# =============================================================================
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    curl \
+    git \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade pip
+RUN pip install --no-cache-dir -U "pip>=24"
+
+# =============================================================================
+# Python Dependencies - Install NVIDIA libs via pip (critical for GPU compat)
+# =============================================================================
+WORKDIR /app
+
+# Install PyTorch with CUDA 12.4 support
+RUN pip install --no-cache-dir \
+    torch==2.4.0 \
+    torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Install nvidia CUDA libraries via pip (avoids driver version mismatch)
+RUN pip install --no-cache-dir \
+    nvidia-cublas-cu12 \
+    nvidia-cudnn-cu12
+
+# Make nvidia pip packages visible to the linker
+ENV LD_LIBRARY_PATH="/usr/local/lib/python3.11/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
+
+# Install other dependencies
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install WhisperX (includes faster-whisper)
+RUN pip install --no-cache-dir whisperx
+
+# =============================================================================
+# Pre-download Whisper Model (for faster startup)
+# =============================================================================
+# Patch torch.load for PyTorch 2.6+ compatibility with pyannote models
+RUN echo "Pre-downloading Whisper model: ${WHISPER_MODEL}" && \
+    python3 -c "import torch; _orig = torch.load; torch.load = lambda *a, **k: _orig(*a, **{**k, 'weights_only': False}); import whisperx; whisperx.load_model('${WHISPER_MODEL}', device='cpu', compute_type='int8'); print('Model downloaded successfully')"
+
+# =============================================================================
+# Application Code
+# =============================================================================
+COPY src/ /app/src/
+
+# =============================================================================
+# Environment
+# =============================================================================
+ENV PYTHONUNBUFFERED=1
+ENV WHISPER_MODEL=${WHISPER_MODEL}
+ENV PORT=8000
+
+# Expose API port
+EXPOSE 8000
+
+# =============================================================================
+# Entry Point - FastAPI HTTP Server
+# =============================================================================
+CMD ["python3", "-u", "src/handler_pod.py"]

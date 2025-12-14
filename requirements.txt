@@ -10,6 +10,11 @@ whisperx>=3.1.1
 # RunPod Serverless SDK
 runpod>=1.6.0
 
+# FastAPI for pod mode HTTP API
+fastapi>=0.104.0
+uvicorn>=0.24.0
+python-multipart>=0.0.6
+
 # Audio processing
 ffmpeg-python>=0.2.0
 pydub>=0.25.1
