@@ -6,17 +6,61 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 WhisperX-RunPod is a batch transcription service with speaker diarization that runs on GPU cloud platforms (AWS EC2 or RunPod). It uses WhisperX for fast transcription with word-level timestamps and pyannote for speaker diarization.
 
-## Architecture
+## Architecture Components
+
+### 1. Build Box (This Machine - NO GPU)
+
+The build box is a regular Linux machine (t3.medium or similar) that:
+- **Does NOT have a GPU** - it cannot run transcription locally
+- Builds Docker images using `docker build`
+- Pushes images to Docker Hub
+- Orchestrates deployments via AWS CLI and RunPod REST API
+- Runs all the deployment scripts
+
+**Why no GPU?** Building Docker images doesn't require a GPU. The GPU is only needed at runtime when the container runs WhisperX. This saves money - GPU instances are expensive.
+
+### 2. AWS EC2 GPU Instance (Testing)
+
+A temporary GPU instance (g4dn.xlarge with Tesla T4) used for:
+- Testing Docker images before deploying to RunPod
+- Debugging issues with full SSH access
+- Validating transcription works correctly
+
+**Workflow:** Build box launches EC2 via AWS CLI → SSH deploys container → Test API → Terminate when done
+
+**Cost:** ~$0.52/hr (pay only while testing)
+
+### 3. RunPod GPU Pod (Production)
+
+Cloud GPU instances for production workloads:
+- Cheaper than EC2 ($0.13-0.20/hr for community cloud)
+- Easy scaling
+- No SSH needed - managed via REST API
+
+**Workflow:** Build box creates pod via RunPod API → Container auto-starts → Access via proxy URL
 
 ```
-Build Box (no GPU)           →    EC2 GPU Instance    →    RunPod Pod (production)
-├── Build Docker image            ├── Run container        ├── Final deployment
-├── Push to Docker Hub            ├── Test API             └── Production workloads
-└── Launch/manage instances       └── Validate before
-    via AWS CLI / RunPod API          RunPod deployment
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              ARCHITECTURE                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   BUILD BOX (no GPU)                                                        │
+│   ├── Build Docker image (docker build)                                     │
+│   ├── Push to Docker Hub (docker push)                                      │
+│   ├── Launch EC2 via AWS CLI ─────────────► EC2 GPU INSTANCE               │
+│   │                                         ├── Pull image from Docker Hub  │
+│   │                                         ├── Run container with GPU      │
+│   │                                         ├── Expose HTTP API port 8000   │
+│   │                                         └── Test & validate             │
+│   │                                                                         │
+│   └── Create RunPod pod via REST API ─────► RUNPOD GPU POD                 │
+│                                             ├── Pull image from Docker Hub  │
+│                                             ├── Run container with GPU      │
+│                                             ├── Expose via proxy URL        │
+│                                             └── Production workloads        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-The build box orchestrates everything via SSH (EC2) or REST API (RunPod). It does NOT need a GPU.
 
 ## Script Structure
 

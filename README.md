@@ -4,11 +4,58 @@ Batch transcription with speaker diarization on GPU cloud (RunPod or AWS EC2).
 
 ## Features
 
-- **70x Realtime Speed** - Batch processing is significantly faster than real-time
+- **35x Realtime Speed** - 56-minute podcast transcribed in 95 seconds
 - **Word-Level Timestamps** - Accurate timing via wav2vec2 alignment
 - **Speaker Diarization** - Automatic speaker identification with pyannote
 - **Multiple Models** - From tiny (fastest) to large-v3 (most accurate)
-- **Pay Per Second** - Only pay for actual GPU usage
+- **Cheap GPU Cloud** - RunPod community cloud from $0.13/hr
+
+---
+
+## Architecture
+
+This project uses a **3-component architecture**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              ARCHITECTURE                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   BUILD BOX (no GPU)                                                        │
+│   ├── Build Docker image (docker build)                                     │
+│   ├── Push to Docker Hub (docker push)                                      │
+│   ├── Launch EC2 via AWS CLI ─────────────► EC2 GPU INSTANCE               │
+│   │                                         ├── Pull image from Docker Hub  │
+│   │                                         ├── Run container with GPU      │
+│   │                                         ├── Expose HTTP API port 8000   │
+│   │                                         └── Test & validate             │
+│   │                                                                         │
+│   └── Create RunPod pod via REST API ─────► RUNPOD GPU POD                 │
+│                                             ├── Pull image from Docker Hub  │
+│                                             ├── Run container with GPU      │
+│                                             ├── Expose via proxy URL        │
+│                                             └── Production workloads        │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Component Details
+
+| Component | GPU? | Purpose | Cost |
+|-----------|------|---------|------|
+| **Build Box** | **NO** | Build images, run scripts, orchestrate deployments | ~$0.04/hr (t3.medium) |
+| **EC2 GPU** | Yes | Test & validate before production | ~$0.52/hr (g4dn.xlarge) |
+| **RunPod** | Yes | Production transcription workloads | ~$0.13-0.20/hr (community) |
+
+### Why This Architecture?
+
+1. **Build Box has NO GPU** - Building Docker images doesn't need a GPU. GPU instances are expensive ($0.50+/hr), so we only use them when actually running transcription.
+
+2. **Test on EC2 First** - EC2 gives you full SSH access for debugging. Test your image works before deploying to RunPod.
+
+3. **Run Production on RunPod** - Cheaper than EC2, easy API management, pay only while transcribing.
+
+---
 
 ## Quick Start
 
