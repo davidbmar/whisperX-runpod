@@ -73,6 +73,14 @@ RUN echo "Pre-downloading Whisper model: ${WHISPER_MODEL}" && \
     python3 -c "import torch; _orig = torch.load; torch.load = lambda *a, **k: _orig(*a, **{**k, 'weights_only': False}); import whisperx; whisperx.load_model('${WHISPER_MODEL}', device='cpu', compute_type='int8'); print('Model downloaded successfully')"
 
 # =============================================================================
+# Pre-cached Pyannote Models (for diarization without HF_TOKEN)
+# =============================================================================
+# Copy pre-cached pyannote models from S3 (downloaded during build prep)
+# This avoids requiring HF_TOKEN at runtime for speaker diarization
+# Source: s3://dbm-cf-2-web/bintarball/diarized/latest/huggingface-cache.tar.gz
+COPY huggingface-cache/ /root/.cache/huggingface/
+
+# =============================================================================
 # Application Code
 # =============================================================================
 COPY src/ /app/src/
@@ -83,6 +91,11 @@ COPY src/ /app/src/
 ENV PYTHONUNBUFFERED=1
 ENV WHISPER_MODEL=${WHISPER_MODEL}
 ENV PORT=8000
+
+# HuggingFace cache location (where pre-cached pyannote models are stored)
+ENV HF_HOME=/root/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/root/.cache/huggingface
+ENV HF_HUB_CACHE=/root/.cache/huggingface/hub
 
 # Expose API port
 EXPOSE 8000

@@ -83,16 +83,46 @@ class WhisperXTranscriber:
 
         # Diarization pipeline (loaded lazily)
         self.diarize_model = None
-        if enable_diarization and hf_token:
+        if enable_diarization:
             self._load_diarization_model()
-        elif enable_diarization and not hf_token:
-            logger.warning("Diarization enabled but HF_TOKEN not provided - diarization will be skipped")
 
     def _load_diarization_model(self) -> None:
-        """Load pyannote diarization pipeline."""
+        """Load pyannote diarization pipeline.
+
+        First tries to load from cache (no token needed if models are pre-cached).
+        Falls back to using HF_TOKEN if cache loading fails.
+        """
         try:
             from whisperx.diarize import DiarizationPipeline
-            logger.info("Loading diarization pipeline...")
+
+            # Try loading from cache first (works if models are pre-baked into Docker image)
+            if not self.hf_token:
+                logger.info("Loading diarization pipeline from cache (no HF_TOKEN)...")
+                try:
+                    # Set HF_HUB_OFFLINE=1 to force cache-only loading
+                    original_offline = os.environ.get("HF_HUB_OFFLINE")
+                    os.environ["HF_HUB_OFFLINE"] = "1"
+                    try:
+                        self.diarize_model = DiarizationPipeline(
+                            use_auth_token=None,
+                            device=self.device
+                        )
+                        logger.info("Diarization pipeline loaded from cache")
+                        return
+                    finally:
+                        # Restore original env var state
+                        if original_offline is None:
+                            os.environ.pop("HF_HUB_OFFLINE", None)
+                        else:
+                            os.environ["HF_HUB_OFFLINE"] = original_offline
+                except Exception as cache_err:
+                    logger.warning(f"Cache load failed: {cache_err}")
+                    logger.warning("Diarization requires HF_TOKEN - will be disabled")
+                    self.diarize_model = None
+                    return
+
+            # Load with HF_TOKEN
+            logger.info("Loading diarization pipeline with HF_TOKEN...")
             self.diarize_model = DiarizationPipeline(
                 use_auth_token=self.hf_token,
                 device=self.device
