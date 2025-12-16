@@ -18,9 +18,11 @@ import tempfile
 import logging
 import gc
 import time
+import json
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 
+import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -286,9 +288,6 @@ async def transcribe(request: TranscribeRequest):
     If result_url is NOT provided:
     - Full result JSON is returned in response (legacy mode)
     """
-    import requests
-    import json
-
     try:
         if not request.audio_base64 and not request.audio_url:
             raise HTTPException(400, "Must provide audio_base64 or audio_url")
