@@ -41,11 +41,78 @@ BATCH_SIZE = int(os.getenv("WHISPER_BATCH_SIZE", "16"))
 HF_TOKEN = os.getenv("HF_TOKEN")
 ENABLE_DIARIZATION = os.getenv("ENABLE_DIARIZATION", "true").lower() == "true"
 PORT = int(os.getenv("PORT", "8000"))
+PYANNOTE_CACHE_URL = os.getenv("PYANNOTE_CACHE_URL", "")
 
 # =============================================================================
 # Logging
 # =============================================================================
 logger = setup_logging("whisperx-pod")
+
+
+# =============================================================================
+# Download Pyannote Models from S3
+# =============================================================================
+def download_pyannote_models():
+    """Download pyannote models from S3 presigned URL if provided."""
+    if not PYANNOTE_CACHE_URL:
+        logger.info("No PYANNOTE_CACHE_URL provided - skipping model download")
+        return False
+
+    import subprocess
+    import tarfile
+
+    cache_dir = os.path.expanduser("~/.cache/huggingface")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    tar_path = "/tmp/huggingface-cache.tar.gz"
+
+    logger.info("Downloading pyannote models from S3...")
+    try:
+        # Download using curl (handles presigned URLs well)
+        result = subprocess.run(
+            ["curl", "-s", "-L", "-o", tar_path, PYANNOTE_CACHE_URL],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        if result.returncode != 0:
+            logger.error(f"Download failed: {result.stderr}")
+            return False
+
+        # Check file size
+        file_size = os.path.getsize(tar_path)
+        logger.info(f"Downloaded {file_size / 1024 / 1024:.1f} MB")
+
+        if file_size < 1000000:  # Less than 1MB probably means error
+            logger.error("Downloaded file too small - likely an error response")
+            return False
+
+        # Extract to cache directory
+        logger.info(f"Extracting to {cache_dir}...")
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(cache_dir)
+
+        # Move contents if nested in 'huggingface' folder
+        nested_dir = os.path.join(cache_dir, "huggingface")
+        if os.path.exists(nested_dir):
+            import shutil
+            for item in os.listdir(nested_dir):
+                src = os.path.join(nested_dir, item)
+                dst = os.path.join(cache_dir, item)
+                if os.path.exists(dst):
+                    shutil.rmtree(dst)
+                shutil.move(src, dst)
+            os.rmdir(nested_dir)
+
+        # Clean up
+        os.remove(tar_path)
+
+        logger.info("Pyannote models downloaded and extracted successfully")
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to download pyannote models: {e}")
+        return False
 
 # =============================================================================
 # Global Model
@@ -85,6 +152,10 @@ async def lifespan(app: FastAPI):
     logger.info(f"Model: {WHISPER_MODEL}, Compute: {COMPUTE_TYPE}")
     logger.info(f"Diarization: {ENABLE_DIARIZATION}")
     logger.info("=" * 60)
+
+    # Download pyannote models from S3 if URL provided
+    if ENABLE_DIARIZATION and PYANNOTE_CACHE_URL:
+        download_pyannote_models()
 
     # Pre-load model on startup
     load_model()
@@ -129,13 +200,19 @@ class HealthResponse(BaseModel):
 # =============================================================================
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    """Health check endpoint."""
+    """Health check endpoint - returns actual model status."""
     import torch
+    # Check if diarization model actually loaded (not just if it's enabled)
+    diarization_ready = (
+        ENABLE_DIARIZATION and
+        transcriber is not None and
+        transcriber.diarize_model is not None
+    )
     return HealthResponse(
         status="ok",
         model=WHISPER_MODEL,
         device="cuda" if torch.cuda.is_available() else "cpu",
-        diarization=ENABLE_DIARIZATION
+        diarization=diarization_ready
     )
 
 
@@ -147,9 +224,42 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "/health": "GET - Health check",
+            "/debug": "GET - Debug status (detailed)",
             "/transcribe": "POST - Transcribe audio (JSON body)",
             "/transcribe/upload": "POST - Transcribe uploaded file"
         }
+    }
+
+
+@app.get("/debug")
+async def debug():
+    """Debug endpoint - shows detailed model status."""
+    import torch
+    import os
+
+    # Check cache directories
+    hf_home = os.environ.get("HF_HOME", "~/.cache/huggingface")
+    hf_home = os.path.expanduser(hf_home)
+    hub_dir = os.path.join(hf_home, "hub")
+
+    pyannote_models = []
+    if os.path.exists(hub_dir):
+        for item in os.listdir(hub_dir):
+            if "pyannote" in item:
+                pyannote_models.append(item)
+
+    return {
+        "whisper_model": WHISPER_MODEL,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "enable_diarization_env": ENABLE_DIARIZATION,
+        "transcriber_loaded": transcriber is not None,
+        "diarize_model_loaded": transcriber is not None and transcriber.diarize_model is not None,
+        "hf_token_provided": bool(HF_TOKEN),
+        "pyannote_cache_url_provided": bool(PYANNOTE_CACHE_URL),
+        "hf_home": hf_home,
+        "pyannote_models_in_cache": pyannote_models,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
     }
 
 

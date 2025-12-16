@@ -95,29 +95,40 @@ class WhisperXTranscriber:
         try:
             from whisperx.diarize import DiarizationPipeline
 
+            # Log cache directory status for debugging
+            hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+            hub_dir = os.path.join(hf_home, "hub")
+            logger.info(f"HuggingFace cache: {hf_home}")
+            if os.path.exists(hub_dir):
+                pyannote_models = [d for d in os.listdir(hub_dir) if "pyannote" in d]
+                logger.info(f"Pyannote models in cache: {pyannote_models}")
+            else:
+                logger.warning(f"Hub directory does not exist: {hub_dir}")
+
             # Try loading from cache first (works if models are pre-baked into Docker image)
             if not self.hf_token:
                 logger.info("Loading diarization pipeline from cache (no HF_TOKEN)...")
                 try:
-                    # Set HF_HUB_OFFLINE=1 to force cache-only loading
-                    original_offline = os.environ.get("HF_HUB_OFFLINE")
-                    os.environ["HF_HUB_OFFLINE"] = "1"
-                    try:
-                        self.diarize_model = DiarizationPipeline(
-                            use_auth_token=None,
-                            device=self.device
-                        )
-                        logger.info("Diarization pipeline loaded from cache")
-                        return
-                    finally:
-                        # Restore original env var state
-                        if original_offline is None:
-                            os.environ.pop("HF_HUB_OFFLINE", None)
-                        else:
-                            os.environ["HF_HUB_OFFLINE"] = original_offline
+                    # Try WITHOUT HF_HUB_OFFLINE first (let huggingface_hub handle caching)
+                    # This works better with newer versions of pyannote
+                    logger.info("Attempting to load diarization pipeline (cache-aware)...")
+                    self.diarize_model = DiarizationPipeline(
+                        use_auth_token=None,
+                        device=self.device
+                    )
+                    logger.info("Diarization pipeline loaded successfully!")
+                    return
                 except Exception as cache_err:
-                    logger.warning(f"Cache load failed: {cache_err}")
-                    logger.warning("Diarization requires HF_TOKEN - will be disabled")
+                    logger.error(f"Cache load failed with error: {type(cache_err).__name__}: {cache_err}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+                    logger.error("=" * 60)
+                    logger.error("DIARIZATION FAILED TO LOAD FROM CACHE")
+                    logger.error("The pyannote models in cache are likely incomplete.")
+                    logger.error("To fix this, either:")
+                    logger.error("  1. Provide HF_TOKEN env var with accepted pyannote terms")
+                    logger.error("  2. Download complete models and rebuild Docker image")
+                    logger.error("=" * 60)
                     self.diarize_model = None
                     return
 
@@ -127,9 +138,11 @@ class WhisperXTranscriber:
                 use_auth_token=self.hf_token,
                 device=self.device
             )
-            logger.info("Diarization pipeline loaded")
+            logger.info("Diarization pipeline loaded with HF_TOKEN")
         except Exception as e:
-            logger.error(f"Failed to load diarization model: {e}")
+            logger.error(f"Failed to load diarization model: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             logger.warning("Diarization will be disabled")
             self.diarize_model = None
 
