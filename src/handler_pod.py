@@ -181,6 +181,7 @@ class TranscribeRequest(BaseModel):
     """Transcription request body."""
     audio_base64: Optional[str] = None
     audio_url: Optional[str] = None
+    result_url: Optional[str] = None  # Presigned PUT URL for uploading result to S3
     language: Optional[str] = None
     diarize: bool = True
     min_speakers: Optional[int] = None
@@ -269,24 +270,37 @@ async def transcribe(request: TranscribeRequest):
     Transcribe audio from URL or base64.
 
     Request body:
-    - audio_url: URL to audio file
+    - audio_url: URL to audio file (or presigned S3 GET URL)
     - audio_base64: Base64 encoded audio
+    - result_url: Presigned S3 PUT URL to upload result (optional)
     - language: Language code (optional, auto-detect if not provided)
     - diarize: Enable speaker diarization (default: true)
     - min_speakers: Minimum speakers hint
     - max_speakers: Maximum speakers hint
+
+    If result_url is provided:
+    - Result JSON is uploaded directly to S3
+    - Response contains only summary (status, counts, timing)
+    - Bypasses proxy timeout issues for large files
+
+    If result_url is NOT provided:
+    - Full result JSON is returned in response (legacy mode)
     """
+    import requests
+    import json
+
     try:
         if not request.audio_base64 and not request.audio_url:
             raise HTTPException(400, "Must provide audio_base64 or audio_url")
 
         model = load_model()
 
-        # Determine file extension
+        # Determine file extension from URL (strip query params for presigned URLs)
         ext = ".wav"
         if request.audio_url:
-            for e in [".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"]:
-                if e in request.audio_url.lower():
+            url_path = request.audio_url.split("?")[0].lower()
+            for e in [".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".webm"]:
+                if url_path.endswith(e):
                     ext = e
                     break
 
@@ -300,12 +314,22 @@ async def transcribe(request: TranscribeRequest):
                 with open(audio_path, 'wb') as f:
                     f.write(audio_bytes)
             else:
-                import urllib.request
-                logger.info(f"Downloading: {sanitize_for_logging(request.audio_url)}")
-                urllib.request.urlretrieve(request.audio_url, audio_path)
+                # Use requests for better handling of presigned URLs
+                logger.info(f"Downloading audio from URL...")
+                download_start = time.time()
+                response = requests.get(request.audio_url, stream=True, timeout=600)
+                response.raise_for_status()
+
+                with open(audio_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+                file_size = os.path.getsize(audio_path)
+                download_elapsed = time.time() - download_start
+                logger.info(f"Downloaded {file_size / 1024 / 1024:.1f} MB in {download_elapsed:.1f}s")
 
             logger.info(f"Transcribing: diarize={request.diarize}")
-            start = time.time()
+            transcribe_start = time.time()
 
             result = model.transcribe(
                 audio_path=audio_path,
@@ -315,10 +339,46 @@ async def transcribe(request: TranscribeRequest):
                 max_speakers=request.max_speakers
             )
 
-            elapsed = time.time() - start
-            logger.info(f"Transcription complete in {elapsed:.1f}s: {len(result.get('segments', []))} segments")
+            transcribe_elapsed = time.time() - transcribe_start
+            total_elapsed = time.time() - (download_start if request.audio_url else transcribe_start)
 
-            result["processing_time_seconds"] = round(elapsed, 2)
+            segments = result.get("segments", [])
+            speakers = result.get("speakers", [])
+            duration = segments[-1]["end"] if segments else 0
+
+            logger.info(f"Transcription complete in {transcribe_elapsed:.1f}s: {len(segments)} segments, {len(speakers)} speakers")
+
+            result["processing_time_seconds"] = round(transcribe_elapsed, 2)
+
+            # If result_url provided, upload to S3 and return summary
+            if request.result_url:
+                logger.info("Uploading result to S3...")
+                upload_start = time.time()
+
+                upload_response = requests.put(
+                    request.result_url,
+                    data=json.dumps(result),
+                    headers={"Content-Type": "application/json"},
+                    timeout=300
+                )
+                upload_response.raise_for_status()
+
+                upload_elapsed = time.time() - upload_start
+                result_size = len(json.dumps(result))
+                logger.info(f"Uploaded {result_size / 1024:.1f} KB to S3 in {upload_elapsed:.1f}s")
+
+                # Return summary instead of full result
+                return {
+                    "status": "ok",
+                    "message": "Transcription uploaded to S3",
+                    "segments_count": len(segments),
+                    "speakers_count": len(speakers),
+                    "duration_seconds": round(duration, 2),
+                    "processing_time_seconds": round(transcribe_elapsed, 2),
+                    "total_time_seconds": round(total_elapsed, 2)
+                }
+
+            # Otherwise return full result (legacy mode)
             return result
 
         finally:
@@ -326,6 +386,9 @@ async def transcribe(request: TranscribeRequest):
                 os.unlink(audio_path)
             gc.collect()
 
+    except requests.exceptions.RequestException as e:
+        logger.error(f"HTTP request error: {e}")
+        raise HTTPException(502, f"HTTP error: {str(e)}")
     except HTTPException:
         raise
     except Exception as e:
