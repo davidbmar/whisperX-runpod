@@ -315,12 +315,21 @@ async def transcribe(request: TranscribeRequest):
             else:
                 # Use requests for better handling of presigned URLs
                 logger.info(f"Downloading audio from URL...")
+                logger.info(f"URL (first 100 chars): {request.audio_url[:100] if request.audio_url else 'None'}...")
                 download_start = time.time()
-                response = requests.get(request.audio_url, stream=True, timeout=600)
-                response.raise_for_status()
 
+                try:
+                    logger.info("Initiating requests.get()...")
+                    http_response = requests.get(request.audio_url, stream=True, timeout=600)
+                    logger.info(f"Response status: {http_response.status_code}")
+                    http_response.raise_for_status()
+                except requests.exceptions.RequestException as req_err:
+                    logger.error(f"Request failed: {type(req_err).__name__}: {req_err}")
+                    raise HTTPException(502, f"Failed to download audio: {req_err}")
+
+                logger.info("Writing to file...")
                 with open(audio_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in http_response.iter_content(chunk_size=8192):
                         f.write(chunk)
 
                 file_size = os.path.getsize(audio_path)
