@@ -635,16 +635,21 @@ main "$@"
 | 30 min | 57 MB | 30s | 180s | 210s | 100s | ❌ TIMEOUT |
 | 74 min | 142 MB | 90s | 450s | 540s | 100s | ❌ TIMEOUT |
 
-### After (Presigned URLs)
+### After (Presigned URLs) - PARTIAL FIX
 
-| Audio Duration | File Size | Request Size | Transcription | Response | Proxy Limit | Result |
-|---------------|-----------|--------------|---------------|----------|-------------|--------|
-| 5 min | 9 MB | <2 KB | 30s | <1 KB | 100s | ✅ OK |
-| 30 min | 57 MB | <2 KB | 180s | <1 KB | 100s | ✅ OK |
-| 74 min | 142 MB | <2 KB | 450s | <1 KB | 100s | ✅ OK |
-| 4 hours | 700 MB | <2 KB | 1800s | <1 KB | 100s | ✅ OK |
+Presigned URLs solve the **payload transfer** timeout (S3 transfers are direct), but **NOT** the HTTP connection timeout. The HTTP request to RunPod still goes through Cloudflare proxy, which has a ~100s idle timeout.
 
-**Key insight:** The only data through the proxy is the tiny JSON request (<2KB) and response (<1KB). The heavy audio/result transfer happens directly between GPU and S3.
+| Audio Duration | File Size | Request Size | Processing Time | HTTP Connection | Result |
+|---------------|-----------|--------------|-----------------|-----------------|--------|
+| 5 min | 9 MB | <2 KB | 30s | Held open 30s | ✅ OK |
+| 17 min | 30 MB | <2 KB | 116s | Held open 116s | ✅ OK (barely) |
+| 45 min | 85 MB | <2 KB | ~300s | **TIMEOUT @ 100s** | ❌ 502/524 |
+| 74 min | 142 MB | <2 KB | ~450s | **TIMEOUT @ 100s** | ❌ 502/524 |
+| 4 hours | 700 MB | <2 KB | ~1800s | **TIMEOUT @ 100s** | ❌ 502/524 |
+
+**The Problem:** Even though the request/response are tiny, the HTTP connection remains open while the server processes the transcription. Cloudflare terminates idle connections after ~100 seconds.
+
+**Solution Required:** Async Request-Reply pattern. See `docs/ASYNC_PATTERN.md` for implementation details.
 
 ---
 
