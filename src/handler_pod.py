@@ -19,8 +19,12 @@ import logging
 import gc
 import time
 import json
+import uuid
+import threading
+from datetime import datetime
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -122,6 +126,82 @@ def download_pyannote_models():
 transcriber: Optional[WhisperXTranscriber] = None
 
 
+# =============================================================================
+# Job State Management (for async pattern)
+# =============================================================================
+@dataclass
+class Job:
+    """Represents a transcription job."""
+    job_id: str
+    status: str = "queued"  # queued, downloading, processing, uploading, completed, failed
+    progress: int = 0
+    message: str = ""
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    failed_at: Optional[str] = None
+    # Result summary (populated on completion)
+    segments_count: int = 0
+    speakers_count: int = 0
+    duration_seconds: float = 0
+    processing_time_seconds: float = 0
+
+
+# In-memory job storage
+jobs: Dict[str, Job] = {}
+jobs_lock = threading.Lock()
+
+# Job retention (cleanup completed jobs after this time)
+JOB_RETENTION_SECONDS = 3600  # 1 hour
+
+
+def create_job() -> Job:
+    """Create a new job and add to storage."""
+    job_id = str(uuid.uuid4())
+    job = Job(job_id=job_id)
+    with jobs_lock:
+        jobs[job_id] = job
+    return job
+
+
+def get_job(job_id: str) -> Optional[Job]:
+    """Get job by ID."""
+    with jobs_lock:
+        return jobs.get(job_id)
+
+
+def update_job(job_id: str, **kwargs):
+    """Update job fields."""
+    with jobs_lock:
+        if job_id in jobs:
+            for key, value in kwargs.items():
+                setattr(jobs[job_id], key, value)
+
+
+def cleanup_old_jobs():
+    """Remove jobs older than retention period."""
+    now = datetime.utcnow()
+    with jobs_lock:
+        to_delete = []
+        for job_id, job in jobs.items():
+            if job.status in ("completed", "failed"):
+                completed = job.completed_at or job.failed_at
+                if completed:
+                    try:
+                        completed_dt = datetime.fromisoformat(completed.rstrip("Z"))
+                        age = (now - completed_dt).total_seconds()
+                        if age > JOB_RETENTION_SECONDS:
+                            to_delete.append(job_id)
+                    except ValueError:
+                        pass
+
+        for job_id in to_delete:
+            del jobs[job_id]
+
+        if to_delete:
+            logger.info(f"Cleaned up {len(to_delete)} old jobs")
+
+
 def load_model() -> WhisperXTranscriber:
     """Load WhisperX model (cached globally)."""
     global transcriber
@@ -188,6 +268,23 @@ class TranscribeRequest(BaseModel):
     diarize: bool = True
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
+    async_mode: bool = True  # Default to async for long files
+
+
+class JobStatusResponse(BaseModel):
+    """Job status response."""
+    job_id: str
+    status: str
+    progress: int = 0
+    message: str = ""
+    error: Optional[str] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    failed_at: Optional[str] = None
+    segments_count: Optional[int] = None
+    speakers_count: Optional[int] = None
+    duration_seconds: Optional[float] = None
+    processing_time_seconds: Optional[float] = None
 
 
 class HealthResponse(BaseModel):
@@ -196,6 +293,119 @@ class HealthResponse(BaseModel):
     model: str
     device: str
     diarization: bool
+
+
+# =============================================================================
+# Background Processing (Async Pattern)
+# =============================================================================
+def process_transcription_async(job_id: str, request: TranscribeRequest):
+    """Process transcription in background thread."""
+    try:
+        update_job(job_id,
+                   status="downloading",
+                   message="Downloading audio from S3...",
+                   started_at=datetime.utcnow().isoformat() + "Z")
+
+        model = load_model()
+
+        # Determine file extension from URL
+        ext = ".wav"
+        if request.audio_url:
+            url_path = request.audio_url.split("?")[0].lower()
+            for e in [".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus", ".webm"]:
+                if url_path.endswith(e):
+                    ext = e
+                    break
+
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+            audio_path = f.name
+
+        try:
+            # Download audio
+            if request.audio_base64:
+                audio_bytes = base64.b64decode(request.audio_base64)
+                with open(audio_path, 'wb') as f:
+                    f.write(audio_bytes)
+                update_job(job_id, progress=10, message="Audio decoded")
+            else:
+                logger.info(f"[Job {job_id[:8]}] Downloading audio...")
+                http_response = requests.get(request.audio_url, stream=True, timeout=600)
+                http_response.raise_for_status()
+
+                with open(audio_path, 'wb') as f:
+                    for chunk in http_response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+                file_size = os.path.getsize(audio_path)
+                logger.info(f"[Job {job_id[:8]}] Downloaded {file_size / 1024 / 1024:.1f} MB")
+
+            update_job(job_id,
+                       status="processing",
+                       progress=15,
+                       message="Transcribing audio...")
+
+            # Transcribe
+            logger.info(f"[Job {job_id[:8]}] Starting transcription, diarize={request.diarize}")
+            start_time = time.time()
+
+            result = model.transcribe(
+                audio_path=audio_path,
+                language=request.language,
+                diarize=request.diarize and ENABLE_DIARIZATION,
+                min_speakers=request.min_speakers,
+                max_speakers=request.max_speakers
+            )
+
+            elapsed = time.time() - start_time
+            logger.info(f"[Job {job_id[:8]}] Transcription complete in {elapsed:.1f}s")
+
+            result["processing_time_seconds"] = round(elapsed, 2)
+
+            # Upload result to S3 if result_url provided
+            if request.result_url:
+                update_job(job_id,
+                           status="uploading",
+                           progress=90,
+                           message="Uploading result to S3...")
+
+                logger.info(f"[Job {job_id[:8]}] Uploading to S3...")
+                upload_response = requests.put(
+                    request.result_url,
+                    data=json.dumps(result),
+                    headers={"Content-Type": "application/json"},
+                    timeout=300
+                )
+                upload_response.raise_for_status()
+                logger.info(f"[Job {job_id[:8]}] Upload complete")
+
+            # Mark complete
+            segments = result.get("segments", [])
+            speakers = result.get("speakers", [])
+            duration = segments[-1]["end"] if segments else 0
+
+            update_job(job_id,
+                       status="completed",
+                       progress=100,
+                       message="Transcription complete" + (" and uploaded to S3" if request.result_url else ""),
+                       completed_at=datetime.utcnow().isoformat() + "Z",
+                       segments_count=len(segments),
+                       speakers_count=len(speakers),
+                       duration_seconds=round(duration, 2),
+                       processing_time_seconds=round(elapsed, 2))
+
+            logger.info(f"[Job {job_id[:8]}] Complete: {len(segments)} segments, {len(speakers)} speakers")
+
+        finally:
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
+            gc.collect()
+
+    except Exception as e:
+        logger.error(f"[Job {job_id[:8]}] Failed: {e}", exc_info=True)
+        update_job(job_id,
+                   status="failed",
+                   error=str(e),
+                   failed_at=datetime.utcnow().isoformat() + "Z")
 
 
 # =============================================================================
@@ -224,12 +434,13 @@ async def root():
     """Root endpoint with API info."""
     return {
         "service": "WhisperX Transcription API",
-        "version": "1.0.0",
+        "version": "2.0.0",  # Async pattern support
         "endpoints": {
             "/health": "GET - Health check",
             "/debug": "GET - Debug status (detailed)",
-            "/transcribe": "POST - Transcribe audio (JSON body)",
-            "/transcribe/upload": "POST - Transcribe uploaded file"
+            "/transcribe": "POST - Transcribe audio (returns job_id, async by default)",
+            "/status/{job_id}": "GET - Get job status",
+            "/transcribe/upload": "POST - Transcribe uploaded file (sync)"
         }
     }
 
@@ -263,7 +474,44 @@ async def debug():
         "pyannote_models_in_cache": pyannote_models,
         "cuda_available": torch.cuda.is_available(),
         "cuda_device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "active_jobs": len([j for j in jobs.values() if j.status in ("queued", "downloading", "processing", "uploading")]),
+        "total_jobs": len(jobs),
     }
+
+
+@app.get("/status/{job_id}", response_model=JobStatusResponse)
+async def get_status(job_id: str):
+    """
+    Get job status.
+
+    Returns current status and progress of a transcription job.
+    Poll this endpoint every 30 seconds to track job progress.
+    """
+    # Cleanup old jobs periodically
+    cleanup_old_jobs()
+
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(404, f"Job {job_id} not found")
+
+    response = JobStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        progress=job.progress,
+        message=job.message,
+        error=job.error,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        failed_at=job.failed_at,
+    )
+
+    if job.status == "completed":
+        response.segments_count = job.segments_count
+        response.speakers_count = job.speakers_count
+        response.duration_seconds = job.duration_seconds
+        response.processing_time_seconds = job.processing_time_seconds
+
+    return response
 
 
 @app.post("/transcribe")
@@ -279,19 +527,48 @@ async def transcribe(request: TranscribeRequest):
     - diarize: Enable speaker diarization (default: true)
     - min_speakers: Minimum speakers hint
     - max_speakers: Maximum speakers hint
+    - async_mode: Process asynchronously (default: true)
 
-    If result_url is provided:
-    - Result JSON is uploaded directly to S3
-    - Response contains only summary (status, counts, timing)
-    - Bypasses proxy timeout issues for large files
+    Async mode (default):
+    - Returns job_id immediately
+    - Process runs in background
+    - Poll /status/{job_id} for progress
+    - Avoids Cloudflare proxy timeout for long audio
 
-    If result_url is NOT provided:
-    - Full result JSON is returned in response (legacy mode)
+    Sync mode (async_mode=false):
+    - Waits for completion (may timeout for long audio)
+    - If result_url provided, uploads to S3 and returns summary
+    - If result_url NOT provided, returns full JSON (legacy mode)
     """
     try:
         if not request.audio_base64 and not request.audio_url:
             raise HTTPException(400, "Must provide audio_base64 or audio_url")
 
+        # =================================================================
+        # ASYNC MODE: Return job_id immediately, process in background
+        # =================================================================
+        if request.async_mode:
+            job = create_job()
+            logger.info(f"Created async job {job.job_id[:8]} for transcription")
+
+            # Start background processing
+            thread = threading.Thread(
+                target=process_transcription_async,
+                args=(job.job_id, request)
+            )
+            thread.daemon = True
+            thread.start()
+
+            # Return immediately
+            return {
+                "job_id": job.job_id,
+                "status": "queued",
+                "message": "Job queued for processing. Poll /status/{job_id} for progress."
+            }
+
+        # =================================================================
+        # SYNC MODE: Process and wait (legacy behavior)
+        # =================================================================
         model = load_model()
 
         # Determine file extension from URL (strip query params for presigned URLs)
